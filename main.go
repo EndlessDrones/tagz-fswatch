@@ -26,6 +26,7 @@ type FileMeta struct {
 	sizeB     int64
 	modTime   time.Time
 	mime      string
+	mimeExt   string
 	sha256    []byte
 	sha256Str string
 }
@@ -105,9 +106,8 @@ func moveFromTmpDoTgt(fromPath string, toPath string, file FileMeta) error {
 }
 
 func buildTgtFilePath(outDir string, fileMeta FileMeta) string {
-	// TODO fix behavior on binary .img files!
 	if fileMeta.origExt != "" {
-		return filepath.Join(outDir, fileMeta.sha256Str+"."+fileMeta.origExt)
+		return filepath.Join(outDir, fileMeta.sha256Str+fileMeta.origExt)
 	} else {
 		return filepath.Join(outDir, fileMeta.sha256Str)
 	}
@@ -139,12 +139,13 @@ func getFileMeta(filePath string) (FileMeta, error) {
 			return FileMeta{}, errors.New(fmt.Sprintf("Error on seeking to the beginning of the file %s : %s", filePath, err))
 		}
 
-		mimeType, ext, err := mimetype.DetectReader(newFile)
+		mimeType, mimeExt, err := mimetype.DetectReader(newFile)
+		ext := filepath.Ext(filePath)
 
 		if err != nil {
 			return FileMeta{}, errors.New(fmt.Sprintf("Error on determining file %s MIME type: %s", filePath, err))
 		}
-		n := FileMeta{origName: fileStatInfo.Name(), origExt: ext, mime: mimeType, modTime: fileStatInfo.ModTime(), sizeB: fileStatInfo.Size(), sha256: sha256Sum, sha256Str: fmt.Sprintf("%x", sha256Sum)}
+		n := FileMeta{origName: fileStatInfo.Name(), origExt: ext, mime: mimeType, mimeExt: mimeExt, modTime: fileStatInfo.ModTime(), sizeB: fileStatInfo.Size(), sha256: sha256Sum, sha256Str: fmt.Sprintf("%x", sha256Sum)}
 		return n, nil
 	}
 }
