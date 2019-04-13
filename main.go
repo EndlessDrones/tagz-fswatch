@@ -69,19 +69,20 @@ func checkIfMovable(tmpDir string, newFile <-chan string, movableFile chan<- str
 }
 
 func handleMovableFiles(tmpDir string, outDir string, movedFilePaths <-chan string, fileMetas chan<- FileMeta) {
-	// TODO it's safe to do it in concurrent manner, lets implement workers here
 	for filePath := range movedFilePaths {
-		fileMeta, err := getFileMeta(filePath)
-		if err != nil {
-			log.Print(err)
-		} else {
-			err := moveFromTmpDoTgt(tmpDir, outDir, fileMeta)
+		go func() {
+			fileMeta, err := getFileMeta(filePath)
 			if err != nil {
 				log.Print(err)
 			} else {
-				fileMetas <- fileMeta
+				err := moveFromTmpDoTgt(tmpDir, outDir, fileMeta)
+				if err != nil {
+					log.Print(err)
+				} else {
+					fileMetas <- fileMeta
+				}
 			}
-		}
+		}()
 	}
 }
 
