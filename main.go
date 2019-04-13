@@ -7,8 +7,8 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/gabriel-vasile/mimetype"
 	"io"
+	"io/ioutil"
 	"log"
-	"mime"
 	"os"
 	"path/filepath"
 	"time"
@@ -23,7 +23,7 @@ const (
 type FileMeta struct {
 	origName  string
 	origExt   string
-	size      int64
+	sizeB     int64
 	modTime   time.Time
 	mime      string
 	sha256    []byte
@@ -62,28 +62,13 @@ func checkIfMovable(tmpDir string, newFile <-chan string, movableFile chan<- str
 			if err == nil {
 				movableFile <- tgtPath
 			}
-		} else {
-			log.Printf("Ignoring %s because there's same file under %s", filePath, tgtPath)
 		}
 	}
 	close(movableFile)
 }
 
-func makeWatcher(watchDir string) *fsnotify.Watcher {
-	watcher, err := fsnotify.NewWatcher()
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	err = watcher.Add(watchDir)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	return watcher
-}
-
-func handleMovableFile(tmpDir string, outDir string, movedFilePaths <-chan string, fileMetas chan<- FileMeta) {
+func handleMovableFiles(tmpDir string, outDir string, movedFilePaths <-chan string, fileMetas chan<- FileMeta) {
+	// TODO it's safe to do it in concurrent manner, lets implement workers here
 	for filePath := range movedFilePaths {
 		fileMeta, err := getFileMeta(filePath)
 		if err != nil {
@@ -99,27 +84,32 @@ func handleMovableFile(tmpDir string, outDir string, movedFilePaths <-chan strin
 	}
 }
 
-func moveFromTmpDoTgt(tmpDir string, outDir string, file FileMeta) error {
-	err := os.Rename(filepath.Join(tmpDir, file.origName), buildFilePath(outDir, file))
-	if err != nil {
-		return errors.New(fmt.Sprintf("Error on moving file %s from %s to %s: %s", file.origName, tmpDir, outDir, err))
+func moveFromTmpDoTgt(fromPath string, toPath string, file FileMeta) error {
+	tmpPath := filepath.Join(fromPath, file.origName)
+	tgtPath := buildTgtFilePath(toPath, file)
+	if _, err := os.Stat(tgtPath); err != nil {
+		err := os.Rename(tmpPath, tgtPath)
+		if err != nil {
+			return errors.New(fmt.Sprintf("Error on moving file %s from %s to %s: %s", file.origName, fromPath, toPath, err))
+		} else {
+			return nil
+		}
 	} else {
-		return nil
+		err := os.Remove(tmpPath)
+		if err != nil {
+			return errors.New(fmt.Sprintf("Couldn't remove ignored file %s", tmpPath))
+		} else {
+			return errors.New(fmt.Sprintf("Ignoring %s as there's file with same hash under %s", tmpPath, toPath))
+		}
 	}
 }
 
-func buildFilePath(outDir string, fileMeta FileMeta) string {
+func buildTgtFilePath(outDir string, fileMeta FileMeta) string {
 	// TODO fix behavior on binary .img files!
-	defaultPath := filepath.Join(outDir, fileMeta.sha256Str+"."+fileMeta.origExt)
-	mimeExt, err := mime.ExtensionsByType(fileMeta.mime)
-	if err != nil {
-		return defaultPath
-	}
-	extBasedMime := mime.TypeByExtension(fileMeta.origExt)
-	if extBasedMime == "" || extBasedMime != fileMeta.mime {
-		return filepath.Join(outDir, fileMeta.sha256Str+mimeExt[0])
+	if fileMeta.origExt != "" {
+		return filepath.Join(outDir, fileMeta.sha256Str+"."+fileMeta.origExt)
 	} else {
-		return defaultPath
+		return filepath.Join(outDir, fileMeta.sha256Str)
 	}
 }
 
@@ -154,17 +144,53 @@ func getFileMeta(filePath string) (FileMeta, error) {
 		if err != nil {
 			return FileMeta{}, errors.New(fmt.Sprintf("Error on determining file %s MIME type: %s", filePath, err))
 		}
-		n := FileMeta{origName: fileStatInfo.Name(), origExt: ext, mime: mimeType, modTime: fileStatInfo.ModTime(), size: fileStatInfo.Size(), sha256: sha256Sum, sha256Str: fmt.Sprintf("%x", sha256Sum)}
+		n := FileMeta{origName: fileStatInfo.Name(), origExt: ext, mime: mimeType, modTime: fileStatInfo.ModTime(), sizeB: fileStatInfo.Size(), sha256: sha256Sum, sha256Str: fmt.Sprintf("%x", sha256Sum)}
 		return n, nil
 	}
 }
 
+func makeWatcher(watchDir string) *fsnotify.Watcher {
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	err = watcher.Add(watchDir)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	return watcher
+}
+
+func getFilePaths(tmpDir string) []string {
+	files, err := ioutil.ReadDir(tmpDir)
+	if err != nil {
+		return []string{}
+	} else {
+		var paths []string
+		for _, fi := range files {
+			paths = append(paths, filepath.Join(tmpDir, fi.Name()))
+		}
+		return paths
+	}
+}
+
 func watchForNewFiles(watcher *fsnotify.Watcher, tmpDir string, outDir string, newFileMeta chan<- FileMeta) {
-	fileWrites := make(chan string)
-	fileNotWritingTo := make(chan string)
-	go processInotify(watcher, fileWrites)
-	go checkIfMovable(tmpDir, fileWrites, fileNotWritingTo)
-	go handleMovableFile(tmpDir, outDir, fileNotWritingTo, newFileMeta)
+	writesFromInotify := make(chan string)
+	movableFiles := make(chan string)
+
+	tmpFiles := getFilePaths(tmpDir)
+	go func() {
+		log.Printf("Handling initially %d files from directory %s", len(tmpFiles), tmpDir)
+		for _, tmpFile := range tmpFiles {
+			movableFiles <- tmpFile
+		}
+	}()
+
+	go processInotify(watcher, writesFromInotify)
+	go checkIfMovable(tmpDir, writesFromInotify, movableFiles)
+	go handleMovableFiles(tmpDir, outDir, movableFiles, newFileMeta)
 }
 
 func main() {
@@ -175,7 +201,7 @@ func main() {
 
 	watchForNewFiles(watcher, TAGZ_TMP_DIR, TAGZ_OUT_DIR, newFileMeta)
 	for fm := range newFileMeta {
-		log.Printf("New file: %s %d %s %s %x", fm.origName, fm.size, fm.modTime, fm.mime, fm.sha256)
+		log.Printf("New file: %s %d %s %s %x", fm.origName, fm.sizeB, fm.modTime, fm.mime, fm.sha256)
 	}
 	log.Print("Exiting!")
 }
