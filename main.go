@@ -146,7 +146,7 @@ func getFileMeta(filePath string) (FileMeta, error) {
 		if err != nil {
 			return FileMeta{}, errors.New(fmt.Sprintf("Error on determining file %s MIME type: %s", filePath, err))
 		}
-		n := FileMeta{origName: fileStatInfo.Name(), origExt: ext, mime: mimeType, mimeExt: mimeExt, modTime: fileStatInfo.ModTime(), sizeB: fileStatInfo.Size(), sha256: sha256Sum, sha256Str: fmt.Sprintf("%x", sha256Sum)}
+		n := FileMeta{origName: fileStatInfo.Name(), origExt: ext, mime: mimeType, mimeExt: mimeExt, modTime: fileStatInfo.ModTime().UTC(), sizeB: fileStatInfo.Size(), sha256: sha256Sum, sha256Str: fmt.Sprintf("%x", sha256Sum)}
 		return n, nil
 	}
 }
